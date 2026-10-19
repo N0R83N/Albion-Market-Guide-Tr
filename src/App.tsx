@@ -142,7 +142,7 @@ function App() {
     const maxAgeMs = maxAgeHours === 0 ? Infinity : maxAgeHours * 60 * 60 * 1000;
     const priceRows = new Map<string, Map<string, MarketResponse>>();
     for (const row of data) {
-      if (row.quality !== quality) continue;
+      if (row.quality !== quality || !selectedCities.includes(row.city)) continue;
       const byCity = priceRows.get(row.item_id) ?? new Map<string, MarketResponse>();
       byCity.set(row.city, row);
       priceRows.set(row.item_id, byCity);
@@ -189,7 +189,7 @@ function App() {
     return result
       .filter((row) => !needle || row.itemName.toLocaleLowerCase('tr-TR').includes(needle) || row.itemId.toLowerCase().includes(needle))
       .sort((a, b) => (b.profit * quantity) - (a.profit * quantity));
-  }, [data, itemById, quality, saleMode, premium, quantity, minimumProfit, maxAgeHours, search]);
+  }, [data, itemById, selectedCities, quality, saleMode, premium, quantity, minimumProfit, maxAgeHours, search]);
 
   const cityCount = selectedCities.length;
   const taxRate = premium ? '4%' : '8%';
@@ -264,6 +264,7 @@ function App() {
                 </label>
               ))}
             </div>
+            <p className="mt-3 text-xs text-slate-500">Eşya, şehir veya kalite seçimini değiştirdiğinde yeni fiyatları almak için “Fiyatları yenile”ye bas.</p>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <label className="text-xs text-slate-400">Kalite
                 <select value={quality} onChange={(event) => setQuality(Number(event.target.value))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-white">
