@@ -18,7 +18,8 @@ function formatSilver(value: number) {
 
 function parseDate(value?: string) {
   if (!value) return null;
-  const date = new Date(value);
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  const date = new Date(hasTimezone ? value : value + 'Z');
   return Number.isNaN(date.getTime()) || date.getTime() < 100000000000 ? null : date;
 }
 
@@ -136,7 +137,7 @@ function App() {
     return () => abortRef.current?.abort();
   }, []);
 
-  const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
+  const itemById = useMemo(() => new Map<string, Item>(items.map((item) => [item.id, item] as const)), [items]);
   const opportunities = useMemo(() => {
     const now = Date.now();
     const maxAgeMs = maxAgeHours === 0 ? Infinity : maxAgeHours * 60 * 60 * 1000;
