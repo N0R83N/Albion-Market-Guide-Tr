@@ -159,6 +159,7 @@ function App() {
       const item = itemById.get(itemId);
       if (!item) continue;
       for (const [buyCity, buyRow] of byCity) {
+        if (buyCity === 'Black Market') continue;
         const buyPrice = Number(buyRow.sell_price_min);
         const buyDate = parseDate(buyRow.sell_price_min_date);
         if (!buyPrice || buyPrice < 0 || !buyDate || now - buyDate.getTime() > maxAgeMs) continue;
@@ -176,7 +177,7 @@ function App() {
           const netSell = sellPrice * (1 - taxRate - sellOrderSetupRate);
           const profit = netSell - buyPrice;
           const profitPercent = (profit / buyPrice) * 100;
-          if (profit <= 0 || profit * quantity < minimumProfit) continue;
+          if (profit <= 0 || profit < minimumProfit) continue;
 
           result.push({
             itemId, itemName: item.name, buyCity, sellCity, buyPrice,
@@ -189,7 +190,7 @@ function App() {
     const needle = search.trim().toLocaleLowerCase('tr-TR');
     return result
       .filter((row) => !needle || row.itemName.toLocaleLowerCase('tr-TR').includes(needle) || row.itemId.toLowerCase().includes(needle))
-      .sort((a, b) => (b.profit * quantity) - (a.profit * quantity));
+      .sort((a, b) => b.profit - a.profit);
   }, [data, itemById, selectedCities, quality, saleMode, premium, quantity, minimumProfit, maxAgeHours, search]);
 
   const cityCount = selectedCities.length;
@@ -288,17 +289,17 @@ function App() {
               <option value="order">Satış ilanı — bekleme ve kurulum ücreti</option>
             </select>
           </label>
-          <label className="min-w-32 text-xs text-slate-400">Adet
+          <label className="min-w-32 text-xs text-slate-400">Taşınacak adet
             <input type="number" min="1" step="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white" />
           </label>
-          <label className="min-w-36 text-xs text-slate-400">En az net kâr
+          <label className="min-w-36 text-xs text-slate-400">En az net kâr / adet
             <input type="number" min="0" step="100" value={minimumProfit} onChange={(event) => setMinimumProfit(Math.max(0, Number(event.target.value) || 0))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white" />
           </label>
           <label className="flex h-11 items-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-slate-200">
             <input type="checkbox" checked={premium} onChange={(event) => setPremium(event.target.checked)} className="accent-amber-400" />
             Premium hesabım var
           </label>
-          <div className="text-xs text-slate-500">Tahmini satış vergisi: {taxRate}{saleMode === 'order' ? ' + %2,5 ilan kurulum ücreti' : ''}</div>
+          <div className="text-xs leading-5 text-slate-500">Kâr ve filtre adet başınadır. API emir miktarını vermediği için toplam pazar derinliği hesaplanamaz. Satış vergisi: {taxRate}{saleMode === 'order' ? ' + %2,5 ilan kurulum ücreti' : ''}</div>
         </section>
 
         <section>
@@ -334,7 +335,7 @@ function App() {
                       <div className="grid h-14 w-14 flex-shrink-0 place-items-center rounded-xl bg-slate-800"><img src={RENDER_BASE + '/' + encodeURIComponent(row.itemId) + '.png'} alt="" className="h-12 w-12 object-contain" loading="lazy" /></div>
                       <div className="min-w-0"><h4 className="truncate font-bold text-white">{row.itemName}</h4><p className="truncate text-xs text-slate-500">{row.itemId} · Kalite {quality}</p></div>
                     </div>
-                    <div className="text-right"><p className="whitespace-nowrap text-lg font-black text-emerald-300">+{formatSilver(row.profit * quantity)}</p><p className="text-xs text-emerald-400">%{row.profitPercent.toLocaleString('tr-TR', { maximumFractionDigits: 1 })} net</p></div>
+                    <div className="text-right"><p className="whitespace-nowrap text-lg font-black text-emerald-300">+{formatSilver(row.profit)}</p><p className="text-xs text-emerald-400">%{row.profitPercent.toLocaleString('tr-TR', { maximumFractionDigits: 1 })} net</p></div>
                   </div>
                   <div className="space-y-3 px-5 pb-5">
                     <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
@@ -344,7 +345,7 @@ function App() {
                     </div>
                     <div className="rounded-2xl border border-amber-400/15 bg-amber-400/5 p-4 text-xs leading-5 text-slate-300">
                       <p className="mb-1 flex items-center gap-2 font-bold text-amber-200"><ShoppingBag size={14} /> Yapılacak işlem</p>
-                      {quantity} adet {row.itemName} ürününü <b>{row.buyCity}</b> şehrinde yaklaşık {formatSilver(row.buyPrice)} / adet fiyatla satın al; <b>{row.sellCity}</b> şehrinde {saleMode === 'instant' ? 'mevcut alış emrine hemen sat' : 'satış ilanı olarak listele'}. Tahmini net: <b className="text-emerald-300">{formatSilver(row.profit * quantity)}</b>.
+                      {quantity} adet {row.itemName} ürününü <b>{row.buyCity}</b> şehrinde yaklaşık {formatSilver(row.buyPrice)} / adet fiyatla satın al; <b>{row.sellCity}</b> şehrinde {saleMode === 'instant' ? 'mevcut alış emrine hemen sat' : 'satış ilanı olarak listele'}. Tahmini net kâr / adet: <b className="text-emerald-300">{formatSilver(row.profit)}</b>. Pazar emrinde yeterli miktar olduğundan emin ol.
                     </div>
                     <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
                       <span><Clock3 size={13} className="mr-1 inline" /> Alış {freshnessLabel(row.buyDate)} · Satış {freshnessLabel(row.sellDate)}</span>
