@@ -1,378 +1,373 @@
-import { useState, useEffect, useMemo } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  TrendingUp, 
-  ArrowRight, 
-  MapPin, 
-  RefreshCw, 
-  Search, 
-  Info, 
-  AlertTriangle,
-  Package,
-  Coins,
-  Navigation,
-  Store,
-  Zap,
-  Clock,
-  ExternalLink
-} from 'lucide-react';
-import { MarketResponse, ArbitrageOpportunity, CITIES, ITEMS } from './types';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import { AlertTriangle, ArrowDown, Clock3, Info, MapPin, Package, Plus, RefreshCw, Search, ShoppingBag, Store, Trash2, TrendingUp } from 'lucide-react';
+import { ITEMS, CITIES } from './types';
+import type { MarketResponse } from './types';
 
-const API_BASE = "https://europe.albion-online-data.com/api/v2/stats/prices";
-const RENDER_BASE = "https://render.albiononline.com/v1/item";
+const API_BASE = 'https://europe.albion-online-data.com/api/v2/stats/prices';
+const RENDER_BASE = 'https://render.albiononline.com/v1/item';
+const MAX_URL_LENGTH = 3900;
+const FRESHNESS_OPTIONS = [1, 6, 24, 48, 0] as const;
 
-export default function App() {
+type Item = { id: string; name: string };
+type SaleMode = 'instant' | 'order';
+
+function formatSilver(value: number) {
+  return Math.round(value).toLocaleString('tr-TR') + ' silver';
+}
+
+function parseDate(value?: string) {
+  if (!value) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  const date = new Date(hasTimezone ? value : value + 'Z');
+  return Number.isNaN(date.getTime()) || date.getTime() < 100000000000 ? null : date;
+}
+
+function freshnessLabel(date: Date | null) {
+  if (!date) return 'Tarih yok';
+  const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  if (minutes < 1) return 'az önce';
+  if (minutes < 60) return minutes + ' dk önce';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + ' sa önce';
+  return Math.floor(hours / 24) + ' gün önce';
+}
+
+function App() {
+  const [items, setItems] = useState<Item[]>(ITEMS.map((item) => ({ ...item })));
+  const [customItem, setCustomItem] = useState('');
+  const [selectedCities, setSelectedCities] = useState<string[]>([...CITIES]);
+  const [quality, setQuality] = useState(1);
+  const [saleMode, setSaleMode] = useState<SaleMode>('instant');
+  const [premium, setPremium] = useState(true);
+  const [quantity, setQuantity] = useState(1);
+  const [minimumProfit, setMinimumProfit] = useState(0);
+  const [maxAgeHours, setMaxAgeHours] = useState<number>(24);
   const [data, setData] = useState<MarketResponse[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [minProfit, setMinProfit] = useState(1000);
-  const [showOutliers, setShowOutliers] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [search, setSearch] = useState('');
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const fetchData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const itemIds = ITEMS.map(i => i.id).join(',');
-      const locations = CITIES.join(',');
-      const response = await fetch(`${API_BASE}/${itemIds}.json?locations=${locations}&qualities=1`);
-      if (!response.ok) throw new Error("API hatası oluştu. Lütfen daha sonra tekrar deneyin.");
-      const json: MarketResponse[] = await response.json();
-      setData(json);
-      setLastFetch(new Date());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Veri çekilemedi.");
-    } finally {
-      setLoading(false);
-    }
+  const addItems = (event: FormEvent) => {
+    event.preventDefault();
+    const candidates = customItem.split(/[,\n;\s]+/).map((id) => id.trim().toUpperCase()).filter(Boolean);
+    const valid = candidates.filter((id) => /^[A-Z0-9_@.-]+$/.test(id));
+    const invalid = candidates.filter((id) => !/^[A-Z0-9_@.-]+$/.test(id));
+    const existing = new Set(items.map((item) => item.id));
+    const additions = valid.filter((id) => !existing.has(id)).map((id) => ({ id, name: id.replace(/_/g, ' ') }));
+    if (additions.length) setItems((current) => [...current, ...additions]);
+    setCustomItem('');
+    setNotice(invalid.length ? 'Geçersiz eşya kodları atlandı: ' + invalid.join(', ') : (additions.length ? additions.length + ' eşya eklendi.' : 'Bu eşya listede zaten var.'));
   };
+
+  const removeItem = (id: string) => {
+    setItems((current) => current.filter((item) => item.id !== id));
+    setData((current) => current.filter((row) => row.item_id !== id));
+  };
+
+  const toggleCity = (city: string) => {
+    setSelectedCities((current) => current.includes(city) ? current.filter((item) => item !== city) : [...current, city]);
+  };
+
+  const fetchData = useCallback(async () => {
+    if (!items.length) {
+      setError('Önce fiyatı aranacak en az bir eşya ekle.');
+      return;
+    }
+    if (selectedCities.length < 2) {
+      setError('Rota hesaplamak için en az iki şehir seç.');
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    setError('');
+    setNotice('');
+    setData([]);
+
+    try {
+      const locations = selectedCities.join(',');
+      const query = 'locations=' + encodeURIComponent(locations) + '&qualities=' + quality;
+      const groups: string[][] = [];
+      let current: string[] = [];
+
+      for (const item of items) {
+        const candidate = [...current, item.id];
+        const url = API_BASE + '/' + candidate.map(encodeURIComponent).join(',') + '.json?' + query;
+        if (url.length > MAX_URL_LENGTH && current.length) {
+          groups.push(current);
+          current = [item.id];
+        } else {
+          current = candidate;
+        }
+      }
+      if (current.length) groups.push(current);
+
+      const responses = await Promise.all(groups.map(async (group) => {
+        const url = API_BASE + '/' + group.map(encodeURIComponent).join(',') + '.json?' + query;
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error('Fiyat servisi ' + response.status + ' yanıtı verdi. Biraz sonra tekrar dene.');
+        const result: MarketResponse[] = await response.json();
+        if (!Array.isArray(result)) throw new Error('Fiyat servisinden beklenmeyen veri geldi.');
+        return result;
+      }));
+
+      const rows = responses.flat();
+      setData(rows);
+      setLastFetch(new Date());
+      if (!rows.length) setNotice('Bu eşya ve şehirler için API’de henüz fiyat kaydı yok. Bu, fiyatların sıfır olduğu anlamına gelmez.');
+      else if (rows.every((row) => !row.sell_price_min && !row.buy_price_max)) {
+        setNotice('Eşya bulundu ancak seçilen şehirlerde kullanılabilir alış/satış fiyatı yok.');
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      setError(err instanceof Error ? err.message : 'Fiyatlar alınamadı. Bağlantını kontrol edip tekrar dene.');
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
+  }, [items, selectedCities, quality]);
 
   useEffect(() => {
     fetchData();
+    return () => abortRef.current?.abort();
   }, []);
 
+  const itemById = useMemo(() => new Map<string, Item>(items.map((item) => [item.id, item] as const)), [items]);
   const opportunities = useMemo(() => {
-    const results: ArbitrageOpportunity[] = [];
+    const now = Date.now();
+    const maxAgeMs = maxAgeHours === 0 ? Infinity : maxAgeHours * 60 * 60 * 1000;
+    const priceRows = new Map<string, Map<string, MarketResponse>>();
+    for (const row of data) {
+      if (row.quality !== quality || !selectedCities.includes(row.city)) continue;
+      const byCity = priceRows.get(row.item_id) ?? new Map<string, MarketResponse>();
+      byCity.set(row.city, row);
+      priceRows.set(row.item_id, byCity);
+    }
 
-    ITEMS.forEach(item => {
-      const itemPrices = data.filter(d => d.item_id === item.id);
-      
-      itemPrices.forEach(buyLoc => {
-        // KURAL 1: Black Market'ten ürün ALINAMAZ. Sadece şehirlerden alınabilir.
-        if (buyLoc.city === "Black Market") return;
-        if (buyLoc.sell_price_min <= 0) return;
+    const result: Array<{
+      itemId: string; itemName: string; buyCity: string; sellCity: string;
+      buyPrice: number; askPrice: number; bidPrice: number; sellPrice: number;
+      profit: number; profitPercent: number; buyDate: Date | null; sellDate: Date | null;
+    }> = [];
 
-        itemPrices.forEach(sellLoc => {
-          // Aynı şehirde ticaret yapılmaz
-          if (buyLoc.city === sellLoc.city) return;
-          
-          const buyPrice = buyLoc.sell_price_min;
-          const isBlackMarket = sellLoc.city === "Black Market";
-          
-          // KURAL 2: Satış fiyatı belirleme
-          // Black Market'e satarken "Buy Order" (Hemen Sat) fiyatı kullanılır.
-          // Şehir marketlerine satarken "Sell Order" (İlan Ver) fiyatı kullanılır.
-          const sellPrice = isBlackMarket ? sellLoc.buy_price_max : sellLoc.sell_price_min;
-          
-          if (sellPrice <= 0) return;
+    for (const [itemId, byCity] of priceRows) {
+      const item = itemById.get(itemId);
+      if (!item) continue;
+      for (const [buyCity, buyRow] of byCity) {
+        if (buyCity === 'Black Market') continue;
+        const buyPrice = Number(buyRow.sell_price_min);
+        const buyDate = parseDate(buyRow.sell_price_min_date);
+        if (!buyPrice || buyPrice < 0 || !buyDate || now - buyDate.getTime() > maxAgeMs) continue;
 
-          const profit = sellPrice - buyPrice;
+        for (const [sellCity, sellRow] of byCity) {
+          if (sellCity === buyCity) continue;
+          const askPrice = Number(sellRow.sell_price_min);
+          const bidPrice = Number(sellRow.buy_price_max);
+          const sellDate = parseDate(saleMode === 'instant' ? sellRow.buy_price_max_date : sellRow.sell_price_min_date);
+          const sellPrice = saleMode === 'instant' ? bidPrice : askPrice;
+          if (!sellPrice || sellPrice <= 0 || !sellDate || now - sellDate.getTime() > maxAgeMs) continue;
+
+          const taxRate = premium ? 0.04 : 0.08;
+          const sellOrderSetupRate = saleMode === 'order' ? 0.025 : 0;
+          const netSell = sellPrice * (1 - taxRate - sellOrderSetupRate);
+          const profit = netSell - buyPrice;
           const profitPercent = (profit / buyPrice) * 100;
+          if (profit <= 0 || profit < minimumProfit) continue;
 
-          // KURAL 3: Anomali ve Mantık Filtreleri
-          // - Kar minimum kardan yüksek olmalı
-          // - Kar oranı %5'ten büyük olmalı
-          // - Kar oranı %500'den küçük olmalı (Eğer showOutliers kapalıysa)
-          const isOutlier = profitPercent >= 500;
-          
-          if (profit > minProfit && profitPercent > 5) {
-            if (!showOutliers && isOutlier) return;
+          result.push({
+            itemId, itemName: item.name, buyCity, sellCity, buyPrice,
+            askPrice, bidPrice, sellPrice, profit, profitPercent, buyDate, sellDate,
+          });
+        }
+      }
+    }
 
-            results.push({
-              itemId: item.id,
-              itemName: item.name,
-              buyCity: buyLoc.city,
-              buyPrice,
-              sellCity: sellLoc.city,
-              sellPrice,
-              profit,
-              profitPercent,
-              lastUpdated: buyLoc.sell_price_min_date
-            });
-          }
-        });
-      });
-    });
-
-    return results
-      .filter(o => o.itemName.toLowerCase().includes(searchTerm.toLowerCase()))
+    const needle = search.trim().toLocaleLowerCase('tr-TR');
+    return result
+      .filter((row) => !needle || row.itemName.toLocaleLowerCase('tr-TR').includes(needle) || row.itemId.toLowerCase().includes(needle))
       .sort((a, b) => b.profit - a.profit);
-  }, [data, searchTerm, minProfit, showOutliers]);
+  }, [data, itemById, selectedCities, quality, saleMode, premium, quantity, minimumProfit, maxAgeHours, search]);
+
+  const cityCount = selectedCities.length;
+  const taxRate = premium ? '4%' : '8%';
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-amber-500/30">
-      {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
-              <TrendingUp className="text-slate-950 w-6 h-6" />
-            </div>
+            <div className="rounded-xl bg-amber-400 p-2 text-slate-950"><TrendingUp size={24} /></div>
             <div>
-              <h1 className="font-bold text-xl tracking-tight text-white">Albion Europe <span className="text-amber-500">Market Guide</span></h1>
-              <p className="text-xs text-slate-400 font-medium uppercase tracking-widest">Europa Server Al-Sat Rehberi</p>
+              <h1 className="text-lg font-black text-white sm:text-xl">Albion Europa <span className="text-amber-400">Pazar Rehberi</span></h1>
+              <p className="text-xs text-slate-400">Europa sunucusunda alış-satış rotaları</p>
             </div>
           </div>
-          
-          <div className="flex items-center gap-4">
-            {lastFetch && (
-              <span className="text-xs text-slate-500 hidden sm:inline">
-                Son Güncelleme: {lastFetch.toLocaleTimeString()}
-              </span>
-            )}
-            <button 
-              onClick={fetchData}
-              disabled={loading}
-              className="p-2 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-50 group"
-            >
-              <RefreshCw className={`w-5 h-5 text-amber-500 ${loading ? 'animate-spin' : 'group-hover:rotate-180 transition-transform duration-500'}`} />
-            </button>
-          </div>
+          <button onClick={fetchData} disabled={loading} className="flex items-center gap-2 rounded-xl bg-amber-400 px-4 py-2.5 font-bold text-slate-950 disabled:opacity-60">
+            <RefreshCw size={17} className={loading ? 'animate-spin' : ''} />
+            <span className="hidden sm:inline">{loading ? 'Fiyatlar alınıyor' : 'Fiyatları yenile'}</span>
+            <span className="sm:hidden">{loading ? 'Yükleniyor' : 'Yenile'}</span>
+          </button>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-8">
-        {/* Intro Section */}
-        <section className="mb-12 grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 bg-gradient-to-br from-slate-900 to-slate-800 p-8 rounded-3xl border border-slate-700/50 relative overflow-hidden">
-            <div className="relative z-10">
-              <h2 className="text-3xl font-bold text-white mb-4">Hoş Geldin Maceracı! ⚔️</h2>
-              <p className="text-slate-300 text-lg mb-6 leading-relaxed">
-                Bu araç, Albion Online Avrupa sunucusundaki şehirler arası fiyat farklarını takip ederek 
-                en karlı ticaret rotalarını bulmana yardımcı olur. "Buradan al, şurada sat" mantığıyla çalışır.
-              </p>
-              <div className="flex flex-wrap gap-4">
-                <div className="flex items-center gap-2 bg-slate-950/50 px-4 py-2 rounded-full border border-slate-700">
-                  <Info className="w-4 h-4 text-amber-500" />
-                  <span className="text-sm">Veriler topluluk tarafından sağlanır.</span>
-                </div>
-                <div className="flex items-center gap-2 bg-slate-950/50 px-4 py-2 rounded-full border border-slate-700">
-                  <AlertTriangle className="w-4 h-4 text-amber-500" />
-                  <span className="text-sm">Fiyatlar anlık değişebilir, her zaman kontrol et!</span>
-                </div>
-              </div>
+      <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:py-9">
+        <section className="grid gap-5 lg:grid-cols-[1.6fr_1fr]">
+          <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-900/60 p-6 sm:p-8">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-bold text-emerald-300"><MapPin size={14} /> EUROPA SUNUCUSU</div>
+            <h2 className="mb-3 text-2xl font-black text-white sm:text-3xl">Nereden alıp nerede satmalı?</h2>
+            <p className="max-w-3xl text-sm leading-6 text-slate-300 sm:text-base">Eşya ve şehirleri seç. Rehber, mevcut en ucuz satış ilanından alış ve seçtiğin satış yöntemine göre tahmini net kazancı hesaplasın.</p>
+            <div className="mt-5 flex flex-wrap gap-2 text-xs text-slate-300">
+              <span className="rounded-full bg-slate-950 px-3 py-2"><Info className="mr-1 inline" size={14} /> Veri oyuncu bildirimlerinden gelir</span>
+              <span className="rounded-full bg-slate-950 px-3 py-2"><AlertTriangle className="mr-1 inline text-amber-400" size={14} /> Oyun içi fiyatı kontrol et</span>
             </div>
-            <div className="absolute -right-20 -bottom-20 w-64 h-64 bg-amber-500/10 rounded-full blur-3xl" />
           </div>
-
-          <div className="bg-amber-500/5 border border-amber-500/20 p-8 rounded-3xl">
-            <h3 className="text-amber-500 font-bold mb-4 flex items-center gap-2">
-              <Navigation className="w-5 h-5" />
-              Nasıl Kullanılır?
-            </h3>
-            <ul className="space-y-4 text-sm text-slate-300">
-              <li className="flex gap-3">
-                <span className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center flex-shrink-0 font-bold">1</span>
-                <span>Aşağıdaki listeden en karlı rotayı seç.</span>
-              </li>
-              <li className="flex gap-3">
-                <span className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center flex-shrink-0 font-bold">2</span>
-                <span>Belirtilen şehre git ve eşyayı satın al.</span>
-              </li>
-              <li className="flex gap-3">
-                <span className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center flex-shrink-0 font-bold">3</span>
-                <span>Diğer şehre taşı ve oradaki markette sat.</span>
-              </li>
-              <li className="mt-4 p-3 bg-slate-900 rounded-xl border border-slate-800 text-xs text-slate-400">
-                💡 İpucu: Caerleon rotaları tehlikelidir (Kırmızı Bölge), dikkatli ol!
-              </li>
-            </ul>
+          <div className="rounded-3xl border border-amber-400/20 bg-amber-400/5 p-6">
+            <h3 className="mb-3 flex items-center gap-2 font-bold text-amber-300"><NavigationIcon /> Nasıl kullanılır?</h3>
+            <ol className="space-y-2 text-sm leading-5 text-slate-300">
+              <li><b className="text-amber-300">1.</b> Eşya kodunu ekle veya örnek listeden seç.</li>
+              <li><b className="text-amber-300">2.</b> Bakmak istediğin şehirleri işaretle.</li>
+              <li><b className="text-amber-300">3.</b> Yenile’ye bas; net kazanç ve fiyat yaşıyla rotayı karşılaştır.</li>
+            </ol>
+            <p className="mt-4 border-t border-amber-400/10 pt-3 text-xs leading-5 text-slate-400">Pazar verisi anlık oyun verisi değildir. API’de son bildirilen fiyatı gösterir; veri eskiyse rota listesine alınmaz.</p>
           </div>
         </section>
 
-        {/* Filters */}
-        <div className="flex flex-col lg:flex-row gap-4 mb-8">
-          <div className="relative flex-1">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 w-5 h-5" />
-            <input 
-              type="text" 
-              placeholder="Eşya ara... (Örn: Bag, Horse)" 
-              className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-4 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-amber-500/50 transition-all"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-4 bg-slate-900 border border-slate-800 rounded-2xl px-6 py-4">
-              <label className="text-sm font-medium text-slate-400 whitespace-nowrap">Min. Kar:</label>
-              <input 
-                type="number" 
-                className="bg-transparent w-24 text-white font-bold focus:outline-none"
-                value={minProfit}
-                onChange={(e) => setMinProfit(Number(e.target.value))}
-              />
-              <Coins className="w-5 h-5 text-amber-500" />
+        <section className="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
+          <div className="rounded-3xl border border-slate-800 bg-slate-900 p-5 sm:p-6">
+            <h3 className="mb-4 flex items-center gap-2 text-lg font-bold text-white"><Package size={19} className="text-amber-400" /> Eşyalar</h3>
+            <form onSubmit={addItems} className="flex flex-col gap-2 sm:flex-row">
+              <input value={customItem} onChange={(event) => setCustomItem(event.target.value)} placeholder="Albion eşya kodu (örn. T4_BAG), birden fazla kodu virgülle ayır" className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm outline-none focus:border-amber-400" />
+              <button type="submit" className="flex items-center justify-center gap-2 rounded-xl bg-amber-400 px-4 py-3 font-bold text-slate-950"><Plus size={17} /> Eşya ekle</button>
+            </form>
+            {notice && <p className="mt-2 text-xs text-amber-200" role="status">{notice}</p>}
+            <p className="mt-2 text-xs leading-5 text-slate-500">Kodları <a className="text-amber-300 underline" href="https://www.albion-online-data.com/items" target="_blank" rel="noreferrer">Albion Data Project eşya aramasında</a> bulabilirsin. Özel eşyalar için API kodunu (UniqueName) buraya ekle.</p>
+            <div className="mt-4 flex max-h-52 flex-wrap content-start gap-2 overflow-auto rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+              {items.length ? items.map((item) => (
+                <span key={item.id} className="inline-flex max-w-full items-center gap-1 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200">
+                  <span className="truncate" title={item.id}>{item.name}</span>
+                  <button aria-label={item.id + ' listesinden çıkar'} onClick={() => removeItem(item.id)} className="ml-1 rounded-full p-0.5 text-slate-500 hover:bg-red-500/20 hover:text-red-300"><Trash2 size={13} /></button>
+                </span>
+              )) : <span className="text-sm text-slate-500">Henüz eşya eklenmedi.</span>}
             </div>
-
-            <button 
-              onClick={() => setShowOutliers(!showOutliers)}
-              className={`flex items-center gap-3 px-6 py-4 rounded-2xl border transition-all font-bold text-sm ${
-                showOutliers 
-                ? 'bg-amber-500/20 border-amber-500 text-amber-500' 
-                : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
-              }`}
-            >
-              <Zap className={`w-5 h-5 ${showOutliers ? 'fill-amber-500' : ''}`} />
-              <span>Anomali Göster</span>
-            </button>
           </div>
-        </div>
 
-        {/* Results */}
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-20 gap-4">
-            <RefreshCw className="w-12 h-12 text-amber-500 animate-spin" />
-            <p className="text-slate-400 animate-pulse">Piyasa verileri taranıyor...</p>
-          </div>
-        ) : error ? (
-          <div className="bg-red-500/10 border border-red-500/20 p-6 rounded-2xl text-center">
-            <AlertTriangle className="w-10 h-10 text-red-500 mx-auto mb-4" />
-            <p className="text-red-400">{error}</p>
-            <button onClick={fetchData} className="mt-4 text-sm font-bold text-white bg-red-500 px-6 py-2 rounded-full">Tekrar Dene</button>
-          </div>
-        ) : opportunities.length === 0 ? (
-          <div className="text-center py-20 bg-slate-900/30 rounded-3xl border border-dashed border-slate-800">
-            <Package className="w-16 h-16 text-slate-700 mx-auto mb-4" />
-            <p className="text-slate-500 text-lg">Şu an karlı bir rota bulunamadı. Filtreleri değiştirmeyi dene.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-            <AnimatePresence mode="popLayout">
-              {opportunities.map((opp, idx) => (
-                <motion.div
-                  key={`${opp.itemId}-${opp.buyCity}-${opp.sellCity}`}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: idx * 0.05 }}
-                  className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden hover:border-amber-500/50 transition-all group flex flex-col"
-                >
-                  <div className="p-6 flex-1">
-                    <div className="flex justify-between items-start mb-6">
-                      <div className="flex items-center gap-3">
-                        <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform p-2 border border-slate-700">
-                          <img 
-                            src={`${RENDER_BASE}/${opp.itemId}.png`} 
-                            alt={opp.itemName} 
-                            className="w-full h-full object-contain"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-white text-lg leading-tight">{opp.itemName}</h4>
-                          <span className="text-xs text-slate-500 uppercase font-bold tracking-tighter">{opp.itemId}</span>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-emerald-400 font-black text-xl">+{opp.profit.toLocaleString()}</div>
-                        <div className="text-xs text-emerald-500/70 font-bold">%{opp.profitPercent.toFixed(1)} Kar</div>
-                      </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      {/* Buy From */}
-                      <div className="flex items-center gap-4 bg-slate-950/50 p-4 rounded-2xl border border-slate-800 relative group/buy">
-                        <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-500">
-                          <Store className="w-4 h-4" />
-                        </div>
-                        <div className="flex-1">
-                          <p className="text-xs text-slate-500 font-bold uppercase">Buradan Al</p>
-                          <p className="font-bold text-white">{opp.buyCity}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm font-bold text-slate-300">{opp.buyPrice.toLocaleString()}</p>
-                          <p className="text-[10px] text-slate-600">Market Fiyatı</p>
-                        </div>
-                      </div>
-
-                      <div className="flex justify-center -my-2 relative z-10">
-                        <div className="bg-slate-900 p-1 rounded-full border border-slate-800">
-                          <ArrowRight className="w-5 h-5 text-amber-500" />
-                        </div>
-                      </div>
-
-                      {/* Sell To */}
-                      <div className="flex items-center gap-4 bg-slate-950/50 p-4 rounded-2xl border border-slate-800 relative group/sell">
-                        <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center text-purple-500">
-                          {opp.sellCity === "Black Market" ? <Zap className="w-4 h-4" /> : <Store className="w-4 h-4" />}
-                        </div>
-                        <div className="flex-1">
-                          <p className="text-xs text-slate-500 font-bold uppercase">Şurada Sat</p>
-                          <p className="font-bold text-white">{opp.sellCity}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm font-bold text-slate-300">{opp.sellPrice.toLocaleString()}</p>
-                          <p className="text-[10px] text-slate-600">
-                            {opp.sellCity === "Black Market" ? "Hemen Sat" : "Market Fiyatı"}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Detailed Instruction */}
-                    <div className="mt-6 p-4 bg-amber-500/5 rounded-2xl border border-amber-500/10">
-                      <div className="flex items-start gap-3">
-                        <Navigation className="w-4 h-4 text-amber-500 mt-1 flex-shrink-0" />
-                        <div className="text-xs text-slate-300 leading-relaxed">
-                          <strong className="text-amber-500 uppercase block mb-1">Talimat:</strong>
-                          {opp.sellCity === "Black Market" ? (
-                            <span>
-                              <strong>{opp.buyCity}</strong> marketinden en ucuz fiyata al. 
-                              Caerleon'daki <strong>Kara Borsa'ya (Black Market)</strong> götür ve 
-                              "Sell" butonuna basarak <strong>Hemen Sat</strong>.
-                            </span>
-                          ) : (
-                            <span>
-                              <strong>{opp.buyCity}</strong> marketinden al. 
-                              <strong>{opp.sellCity}</strong> marketine götür ve 
-                              mevcut en düşük fiyattan 1 gümüş ucuza <strong>Satış İlanı Ver</strong>.
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="bg-slate-800/50 px-6 py-3 flex justify-between items-center border-t border-slate-800">
-                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-medium">
-                      <Clock className="w-3 h-3" />
-                      {new Date(opp.lastUpdated).toLocaleTimeString()}
-                    </div>
-                    <div className="flex items-center gap-1 text-[10px] text-amber-500/70 font-bold uppercase">
-                      <TrendingUp className="w-3 h-3" />
-                      Fırsat Aktif
-                    </div>
-                  </div>
-                </motion.div>
+          <div className="rounded-3xl border border-slate-800 bg-slate-900 p-5 sm:p-6">
+            <h3 className="mb-4 flex items-center gap-2 text-lg font-bold text-white"><MapPin size={19} className="text-amber-400" /> Şehirler <span className="text-sm font-normal text-slate-500">({cityCount} seçili)</span></h3>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {CITIES.map((city) => (
+                <label key={city} className={'flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-sm ' + (selectedCities.includes(city) ? 'border-amber-400/50 bg-amber-400/10 text-amber-100' : 'border-slate-800 bg-slate-950 text-slate-400')}>
+                  <input type="checkbox" checked={selectedCities.includes(city)} onChange={() => toggleCity(city)} className="accent-amber-400" />
+                  <span className="truncate">{city}</span>
+                </label>
               ))}
-            </AnimatePresence>
+            </div>
+            <p className="mt-3 text-xs text-slate-500">Eşya, şehir veya kalite seçimini değiştirdiğinde yeni fiyatları almak için “Fiyatları yenile”ye bas.</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs text-slate-400">Kalite
+                <select value={quality} onChange={(event) => setQuality(Number(event.target.value))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-white">
+                  {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} — {['Normal', 'İyi', 'Olağanüstü', 'Mükemmel', 'Usta işi'][value - 1]}</option>)}
+                </select>
+              </label>
+              <label className="text-xs text-slate-400">Maksimum veri yaşı
+                <select value={maxAgeHours} onChange={(event) => setMaxAgeHours(Number(event.target.value))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-white">
+                  {FRESHNESS_OPTIONS.map((value) => <option key={value} value={value}>{value ? value + ' saat' : 'Sınır yok'}</option>)}
+                </select>
+              </label>
+            </div>
           </div>
-        )}
+        </section>
+
+        <section className="flex flex-col gap-4 rounded-3xl border border-slate-800 bg-slate-900 p-4 sm:flex-row sm:flex-wrap sm:items-end sm:p-5">
+          <label className="min-w-44 flex-1 text-xs text-slate-400">Satış yöntemi
+            <select value={saleMode} onChange={(event) => setSaleMode(event.target.value as SaleMode)} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white">
+              <option value="instant">Hemen sat — mevcut alış emri</option>
+              <option value="order">Satış ilanı — bekleme ve kurulum ücreti</option>
+            </select>
+          </label>
+          <label className="min-w-32 text-xs text-slate-400">Taşınacak adet
+            <input type="number" min="1" step="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white" />
+          </label>
+          <label className="min-w-36 text-xs text-slate-400">En az net kâr / adet
+            <input type="number" min="0" step="100" value={minimumProfit} onChange={(event) => setMinimumProfit(Math.max(0, Number(event.target.value) || 0))} className="mt-1 block w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white" />
+          </label>
+          <label className="flex h-11 items-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-slate-200">
+            <input type="checkbox" checked={premium} onChange={(event) => setPremium(event.target.checked)} className="accent-amber-400" />
+            Premium hesabım var
+          </label>
+          <div className="text-xs leading-5 text-slate-500">Kâr ve filtre adet başınadır. API emir miktarını vermediği için toplam pazar derinliği hesaplanamaz. Satış vergisi: {taxRate}{saleMode === 'order' ? ' + %2,5 ilan kurulum ücreti' : ''}</div>
+        </section>
+
+        <section>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="text-xl font-black text-white">Alış-satış rotaları <span className="text-sm font-normal text-slate-500">({opportunities.length})</span></h3>
+              <p className="mt-1 text-xs text-slate-500">{lastFetch ? 'Son API sorgusu: ' + lastFetch.toLocaleTimeString('tr-TR') : 'Fiyatlar bekleniyor'}</p>
+            </div>
+            <div className="relative w-full sm:max-w-xs">
+              <Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Sonuçlarda eşya ara..." className="w-full rounded-xl border border-slate-800 bg-slate-900 py-3 pl-10 pr-3 text-sm outline-none focus:border-amber-400" />
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="rounded-3xl border border-slate-800 bg-slate-900 py-16 text-center"><RefreshCw size={32} className="mx-auto mb-3 animate-spin text-amber-400" /><p className="text-slate-300">Europa fiyatları alınıyor…</p><p className="mt-1 text-xs text-slate-500">{items.length} eşya · {cityCount} şehir</p></div>
+          ) : error ? (
+            <div role="alert" className="rounded-3xl border border-red-500/30 bg-red-500/10 p-6 text-center"><AlertTriangle size={30} className="mx-auto mb-3 text-red-300" /><p className="text-red-200">{error}</p><button onClick={fetchData} className="mt-4 rounded-xl bg-red-500 px-4 py-2 font-bold text-white">Tekrar dene</button></div>
+          ) : notice && !data.length ? (
+            <div className="rounded-3xl border border-amber-400/20 bg-amber-400/5 p-6 text-center text-sm text-amber-100">{notice}</div>
+          ) : opportunities.length === 0 ? (
+            <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-900/50 px-5 py-14 text-center">
+              <Package size={36} className="mx-auto mb-3 text-slate-600" />
+              <p className="font-bold text-slate-300">Seçilen eşya ve filtrelerde güvenilir bir kâr rotası bulunamadı.</p>
+              <p className="mt-2 text-sm text-slate-500">Şehirleri veya veri yaşını değiştirip fiyatları yenilemeyi dene. Eksik/eski pazar kayıtları fırsat olarak gösterilmez.</p>
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {opportunities.map((row) => (
+                <article key={row.itemId + row.buyCity + row.sellCity} className="overflow-hidden rounded-3xl border border-slate-800 bg-slate-900">
+                  <div className="flex items-start justify-between gap-3 p-5">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="grid h-14 w-14 flex-shrink-0 place-items-center rounded-xl bg-slate-800"><img src={RENDER_BASE + '/' + encodeURIComponent(row.itemId) + '.png'} alt="" className="h-12 w-12 object-contain" loading="lazy" /></div>
+                      <div className="min-w-0"><h4 className="truncate font-bold text-white">{row.itemName}</h4><p className="truncate text-xs text-slate-500">{row.itemId} · Kalite {quality}</p></div>
+                    </div>
+                    <div className="text-right"><p className="whitespace-nowrap text-lg font-black text-emerald-300">+{formatSilver(row.profit)}</p><p className="text-xs text-emerald-400">%{row.profitPercent.toLocaleString('tr-TR', { maximumFractionDigits: 1 })} net</p></div>
+                  </div>
+                  <div className="space-y-3 px-5 pb-5">
+                    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                      <div className="flex items-center gap-3"><Store size={17} className="text-sky-300" /><div className="flex-1"><p className="text-xs font-bold uppercase text-slate-500">Buradan al</p><p className="font-bold text-white">{row.buyCity}</p></div><div className="text-right"><p className="font-bold text-slate-200">{formatSilver(row.buyPrice)}</p><p className="text-[10px] text-slate-500">en düşük satış ilanı · hemen al</p></div></div>
+                      <div className="my-2 flex justify-center text-amber-400"><ArrowDown size={16} /></div>
+                      <div className="flex items-center gap-3"><Store size={17} className="text-violet-300" /><div className="flex-1"><p className="text-xs font-bold uppercase text-slate-500">Şurada sat</p><p className="font-bold text-white">{row.sellCity}</p></div><div className="text-right"><p className="font-bold text-slate-200">{formatSilver(row.sellPrice)}</p><p className="text-[10px] text-slate-500">{saleMode === 'instant' ? 'en yüksek alış emri' : 'en düşük satış ilanı'}</p></div></div>
+                    </div>
+                    <div className="rounded-2xl border border-amber-400/15 bg-amber-400/5 p-4 text-xs leading-5 text-slate-300">
+                      <p className="mb-1 flex items-center gap-2 font-bold text-amber-200"><ShoppingBag size={14} /> Yapılacak işlem</p>
+                      {quantity} adet {row.itemName} ürününü <b>{row.buyCity}</b> şehrinde yaklaşık {formatSilver(row.buyPrice)} / adet fiyatla satın al; <b>{row.sellCity}</b> şehrinde {saleMode === 'instant' ? 'mevcut alış emrine hemen sat' : 'satış ilanı olarak listele'}. Tahmini net kâr / adet: <b className="text-emerald-300">{formatSilver(row.profit)}</b>. Pazar emrinde yeterli miktar olduğundan emin ol.
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                      <span><Clock3 size={13} className="mr-1 inline" /> Alış {freshnessLabel(row.buyDate)} · Satış {freshnessLabel(row.sellDate)}</span>
+                      <span>Vergi ve ücretler tahmini dahildir</span>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
       </main>
 
-      {/* Footer */}
-      <footer className="max-w-7xl mx-auto px-4 py-12 border-t border-slate-900 mt-20">
-        <div className="flex flex-col md:flex-row justify-between items-center gap-8">
-          <div className="flex items-center gap-3 opacity-50">
-            <TrendingUp className="text-amber-500 w-5 h-5" />
-            <span className="font-bold text-sm">Albion Europe Market Guide</span>
-          </div>
-          <div className="text-slate-500 text-xs text-center md:text-right max-w-md">
-            Bu site Albion Online Data Project verilerini kullanır. Albion Online, Sandbox Interactive GmbH'nin tescilli markasıdır. 
-            Veriler her zaman %100 doğru olmayabilir, oyun içinde kontrol etmeniz önerilir.
-          </div>
-        </div>
+      <footer className="mx-auto mt-10 max-w-7xl border-t border-slate-900 px-4 py-7 text-center text-xs leading-5 text-slate-500">
+        Albion Online Data Project tarafından paylaşılan topluluk verisini kullanır; resmî Albion Online aracı değildir. Veriler gecikebilir veya eksik olabilir. İşlem yapmadan önce oyun içindeki pazar fiyatlarını ve rotanın riskini kontrol et.
       </footer>
     </div>
   );
 }
+
+function NavigationIcon() {
+  return <MapPin size={19} />;
+}
+
+export default App;
