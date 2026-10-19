@@ -243,7 +243,7 @@ function App() {
               <button type="submit" className="flex items-center justify-center gap-2 rounded-xl bg-amber-400 px-4 py-3 font-bold text-slate-950"><Plus size={17} /> Eşya ekle</button>
             </form>
             {notice && <p className="mt-2 text-xs text-amber-200" role="status">{notice}</p>}
-            <p className="mt-2 text-xs leading-5 text-slate-500">Kodları Albion Data Project’in eşya listesinde bulabilirsin. Özel eşyalar için API kodunu (UniqueName) buraya ekle.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Kodları <a className="text-amber-300 underline" href="https://www.albion-online-data.com/items" target="_blank" rel="noreferrer">Albion Data Project eşya aramasında</a> bulabilirsin. Özel eşyalar için API kodunu (UniqueName) buraya ekle.</p>
             <div className="mt-4 flex max-h-52 flex-wrap content-start gap-2 overflow-auto rounded-xl border border-slate-800 bg-slate-950/50 p-3">
               {items.length ? items.map((item) => (
                 <span key={item.id} className="inline-flex max-w-full items-center gap-1 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200">
